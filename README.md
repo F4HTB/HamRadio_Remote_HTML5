@@ -19,3 +19,7 @@ git clone https://github.com/F4HTB/HamRadio_Remote_HTML5.git
 chmod 755 ./R817
 
 ./R817
+
+and connect with firefox or chrome to:
+
+https://raspberrypi.local:8888/
