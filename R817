@@ -1,0 +1,752 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*- 
+
+#websocket
+import os
+import tornado.httpserver
+import tornado.ioloop
+import tornado.web
+import tornado.websocket
+
+#TX
+import gc
+import pyaudio
+from opus.decoder import Decoder as OpusDecoder
+
+#RX
+from tornado import gen
+
+#FFT
+from matplotlib import mlab as mlab
+from rtlsdr import RtlSdr
+import struct
+import datetime
+import threading
+from threading import Thread
+import numpy as np
+import math
+import time
+
+#Control
+import serial
+
+
+########### Generate and send FFT from RTLSDR ###############
+sdr = RtlSdr()
+# configure device
+sdr.sample_rate = 250000  # Hz
+sdr.center_freq = 68330000  # Hz
+sdr.freq_correction = 1   # PPM
+sdr.gain = 100 #'auto'
+
+FFTSIZE=2048
+nbBuffer=24
+
+asciilist=""
+
+class loadFFTdata(Thread):
+
+	def __init__(self):
+		Thread.__init__(self)
+		self.get_log_power_spectrum_w = np.empty(FFTSIZE)
+		for i in range(FFTSIZE):
+			self.get_log_power_spectrum_w[i] = 0.5 * (1. - math.cos((2 * math.pi * i) / (FFTSIZE - 1)))
+
+	def run(self):
+		while True:
+			time.sleep(0.2)
+			self.getFFT_data()
+
+			
+	def get_log_power_spectrum(self,data):
+
+			pulse = 10
+			rejected_count = 0
+			power_spectrum = np.zeros(FFTSIZE)
+			db_adjust = 20. * math.log10(FFTSIZE * 2 ** 15)
+
+			# Time-domain analysis: Often we have long normal signals interrupted
+			# by huge wide-band pulses that degrade our power spectrum average.
+			# We find the "normal" signal level, by computing the median of the
+			# absolute value.  We only do this for the first buffer of a chunk,
+			# using the median for the remaining buffers in the chunk.
+			# A "noise pulse" is a signal level greater than some threshold
+			# times the median.  When such a pulse is found, we skip the current
+			# buffer.  It would be better to blank out just the pulse, but that
+			# would be more costly in CPU time.
+
+			# Find the median abs value of first buffer to use for this chunk.
+			td_median = np.median(np.abs(data[:FFTSIZE]))
+			# Calculate our current threshold relative to measured median.
+			td_threshold = pulse * td_median
+			nbuf_taken = 0  # Actual number of buffers accumulated
+			for ic in range(nbBuffer-1):
+				start=ic * int(FFTSIZE/2)
+				end=start+FFTSIZE
+				td_segment = data[start:end]
+
+				# remove the 0hz spike
+				td_segment = np.subtract(td_segment, np.average(td_segment))
+
+				td_max = np.amax(np.abs(td_segment))  # Do we have a noise pulse?
+				if td_max < td_threshold:  # No, get pwr spectrum etc.
+					# EXPERIMENTAL TAPERfd
+					td_segment *= self.get_log_power_spectrum_w
+
+					fd_spectrum = np.fft.fft(td_segment)
+					# Frequency-domain:
+					# Rotate array to place 0 freq. in center.  (It was at left.)
+					fd_spectrum_rot = np.fft.fftshift(fd_spectrum)
+					# Compute the real-valued squared magnitude (ie power) and 
+					# accumulate into pwr_acc.
+					# fastest way to sum |z|**2 ??
+					nbuf_taken += 1
+					power_spectrum = power_spectrum + \
+						np.real(fd_spectrum_rot * fd_spectrum_rot.conj())
+				else:  # Yes, abort buffer.
+					rejected_count += 1
+					# if DEBUG: print "REJECT! %d" % self.rejected_count
+			if nbuf_taken > 0:
+				power_spectrum = power_spectrum / nbuf_taken  # normalize the sum.
+			else:
+				power_spectrum = np.ones(FFTSIZE)  # if no good buffers!
+			# Convert to dB. Note log(0) = "-inf" in Numpy. It can happen if ADC 
+			# isn't working right. Numpy issues a warning.
+			log_power_spectrum = 10. * np.log10(power_spectrum)
+			return log_power_spectrum - db_adjust  # max poss. signal = 0 dB
+
+	def getFFT_data(self):
+		global asciilist
+		samples = sdr.read_samples(nbBuffer/2*FFTSIZE)
+		samples = np.imag(samples) + 1j * np.real(samples)
+
+		max_pow = 0
+		min_pow = 0
+
+		power = self.get_log_power_spectrum(samples)
+		power += 60
+
+		# search whole data set for maximum and minimum value
+		for dat in power:
+			if dat > max_pow:
+				max_pow = dat
+			elif dat < min_pow:
+				min_pow = dat
+
+		asciilist=""
+		for dat in power:
+			try:
+				asciilist+=(chr(self.FFTmymap(dat, min_pow, max_pow, 0, 125)))
+			except (RuntimeError, TypeError, NameError):
+				asciilist+=chr(0)
+				pass
+		
+	def FFTmymap(self, x, in_min, in_max, out_min, out_max):
+		ret=int((x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min)
+		return ret
+
+class FFTHandler(tornado.websocket.WebSocketHandler):
+
+	def sendFFT(self):
+		global asciilist
+		try:
+			for i in range(8):
+				self.write_message(asciilist[i*256:(i+1)*256])
+			self.write_message("NewLine")
+		except:
+			return None
+		tornado.ioloop.IOLoop.instance().add_timeout(datetime.timedelta(seconds=0.2), self.sendFFT)
+
+	def open(self):
+		print('new connection on FFT socket')
+		self.sendFFT()
+
+	def on_close(self):
+		print('connection closed for FFT socket')
+##########################
+
+########### Receive TX audio from microphone from distant user ###############
+p = pyaudio.PyAudio()
+
+class TXDecoderWS(tornado.websocket.WebSocketHandler):
+
+	#pmeter_map = [   0,   5,    7,  10,  17,  25,  33,  41,  50 ]
+	pmeter_map = [   0,   10,    14,  20,  34,  50,  66,  82,  100 ]
+				   # 0, 0.5, 0.75, 1.0, 1.7, 2.5, 3.3, 4.1, 5.0
+
+	swr_map = [   0,  4,  8, 13, 25, 37, 60, 70, 80, 90, 100, 100, 100, 100, 100, 100]
+			    # 0,  1,  2,  3,  4,  5,  6,  7,  8,  9,  10,  11,  12,  13,  14,  15
+
+	alc_map = [   0,  20,  40,  60,  80, 100, 100, 100,  100, 100, 100, 100, 100, 100]
+				# 0,  1,  2,  3,  4,  5,  6,  7,  8,  9,  10,  11,  12,  13,  14,  15
+
+	mod_map = [   0,  20,  40,  60,  80, 100, 100, 100,  100, 100, 100, 100, 100, 100]
+				# 0,  1,  2,  3,  4,  5,  6,  7,  8,  9,  10,  11,  12,  13,  14,  15
+
+	def sendPTINFOS(self):
+		global TRXMETER
+		try:
+			if TRXMETER["Status"]:
+				self.write_message("TXMET:"+str(self.pmeter_map[int(TRXMETER["TXpwr"])])+
+				"/"+str(self.swr_map[int(TRXMETER["TXswr"])])+
+				"/"+str(self.alc_map[int(TRXMETER["TXalc"])])+
+				"/"+str(self.mod_map[int(TRXMETER["TXmod"])])
+				)
+		except:
+			print("error TXMETER")
+			return None
+		tornado.ioloop.IOLoop.instance().add_timeout(datetime.timedelta(seconds=0.2), self.sendPTINFOS)
+
+	def TX_init(self, msg) :
+
+		rate, is_encoded, op_rate, op_frm_dur = [int(i) for i in msg.split(',')]
+		self.is_encoded = is_encoded
+		self.decoder = OpusDecoder(op_rate, 1)
+		self.frame_size = op_frm_dur * op_rate
+
+		self.streamTX = p.open(format=pyaudio.paInt16, 
+			   channels = 1, 
+			   rate = rate, 
+			   output = True, 
+			   frames_per_buffer = 2048 , 
+			   ) 		
+
+	
+	def open(self):
+		self.sendPTINFOS()
+		print('new connection on TX socket')
+
+	def on_message(self, data) :
+
+		if str(data).startswith('m:') :
+			self.TX_init(str(data[2:]))
+		elif str(data).startswith('s:') :
+			self.streamTX.close()
+		else :
+			if self.is_encoded :
+				pcm = self.decoder.decode(data, self.frame_size, False)
+				self.streamTX.write(pcm)
+				gc.collect()
+
+			else :
+				self.streamTX.write(data)
+				gc.collect()
+
+	def on_close(self):
+		if(hasattr(self,"streamTX")):
+			self.streamTX.close()
+		print('connection closed for TX socket')		
+##########################
+
+############ Send RX audio from TRX ##############
+
+Wavframes = []
+flagWavstart = False
+
+class loadWavdata(Thread):
+
+	def __init__(self):
+		global flagWavstart
+		Thread.__init__(self)
+		self.streamRX = p.open(format=pyaudio.paInt16, channels=1,
+						rate=44100, input=True,input_device_index=1,
+						frames_per_buffer=512)
+		flagWavstart = True
+
+	def run(self):
+		global Wavframes, flagWavstart
+		while flagWavstart:
+			data = self.streamRX.read(512, exception_on_overflow = False)  
+			Wavframes.append(data)
+		self.streamRX.close()
+
+			
+class AudioHandler(tornado.web.RequestHandler):
+
+	def genHeader(self,sampleRate, bitsPerSample, channels):
+		datasize = 2000*10**6
+		o = bytes("RIFF",'ascii')											   # (4byte) Marks file as RIFF
+		o += (datasize + 36).to_bytes(4,'little')							   # (4byte) File size in bytes excluding this and RIFF marker
+		o += bytes("WAVE",'ascii')											  # (4byte) File type
+		o += bytes("fmt ",'ascii')											  # (4byte) Format Chunk Marker
+		o += (16).to_bytes(4,'little')										  # (4byte) Length of above format data
+		o += (1).to_bytes(2,'little')										   # (2byte) Format type (1 - PCM)
+		o += (channels).to_bytes(2,'little')									# (2byte)
+		o += (sampleRate).to_bytes(4,'little')								  # (4byte)
+		o += (sampleRate * channels * bitsPerSample // 8).to_bytes(4,'little')  # (4byte)
+		o += (channels * bitsPerSample // 8).to_bytes(2,'little')			   # (2byte)
+		o += (bitsPerSample).to_bytes(2,'little')							   # (2byte)
+		o += bytes("data",'ascii')											  # (4byte) Data Chunk Marker
+		o += (datasize).to_bytes(4,'little')									# (4byte) Data size in bytes
+		return o
+	
+	def on_connection_close(self):
+		global Wavframes, flagWavstart
+		Wavframes = []
+		flagWavstart = False
+
+	@gen.coroutine
+	def get(self):
+		global Wavframes, flagWavstart
+		
+		try:
+			threadloadWavdata = loadWavdata()
+			threadloadWavdata.start()
+		except:
+			pass
+		
+		print('new connection on RX socket')
+		wav_header = self.genHeader(44100, 16, 1)
+		print("recording...")
+		
+		while len(Wavframes)<5:
+			time.sleep(0.005)
+		self.write(wav_header + Wavframes[0])
+		del Wavframes[0]
+		while True:
+			while len(Wavframes)<5:
+				time.sleep(0.005)
+			data = Wavframes[0] 
+			del Wavframes[0] 
+			self.write(data)
+			self.flush(callback=(yield gen.Callback('flush')))
+			yield gen.Wait('flush')
+			
+			
+
+##########################
+
+########### Control TRX ###############
+
+SERIAL_PORT = "/dev/ttyUSB0"
+SERIAL_SPEED = 38400
+SERIAL_STOPBITS = serial.STOPBITS_TWO
+SERIAL_TIMEOUT = 1.0
+
+threadTRXLocker=False
+TRXMETER={}
+TRXMETER["Status"]=False
+TRXMETER["RX"]="0"
+TRXMETER["RXold"]="0"
+TRXMETER["TXpwr"]="0"
+TRXMETER["TXswr"]="0"
+TRXMETER["TXalc"]="0"
+TRXMETER["TXmod"]="0"
+TRXMETER["LastPing"]=time.time()
+
+FT817serial = serial.Serial() #serial.Serial(SERIAL_PORT, SERIAL_SPEED, stopbits=SERIAL_STOPBITS, timeout=SERIAL_TIMEOUT, write_timeout=SERIAL_TIMEOUT)
+
+def startTRX():
+	global FT817serial, SERIAL_PORT, SERIAL_SPEED, SERIAL_STOPBITS, SERIAL_TIMEOUT
+	print("startTRX")
+	try:
+		FT817serial.close()
+		FT817serial = serial.Serial(SERIAL_PORT, SERIAL_SPEED, stopbits=SERIAL_STOPBITS, timeout=SERIAL_TIMEOUT, write_timeout=SERIAL_TIMEOUT)
+	except:
+		pass
+		
+	try:
+		FT817serial.reset_output_buffer()
+		FT817serial.write([0x00, 0x00, 0x00, 0x00, 0x03])
+		FT817serial.flush()
+		FT817serial.reset_input_buffer()
+		resp = FT817serial.read(5)
+		if len(resp) == 0:
+			FT817serial.reset_output_buffer()
+			FT817serial.write([0xff, 0xff, 0xff, 0xff, 0xff])
+			FT817serial.flush()
+			FT817serial.reset_output_buffer()
+			FT817serial.write([0x00, 0x00, 0x00, 0x00, 0x0f])
+			FT817serial.flush()
+	except:
+		print("unable to start FT817")
+		pass
+	
+def shutdownTRX():
+	global FT817serial
+	print("shutdownTRX")
+	while threadTRXLocker == True:
+		time.sleep(0.1)
+	threadTRXLocker == True
+	if FT817serial.is_open == True:
+		FT817serial.reset_output_buffer()
+		FT817serial.write([0x00, 0x00, 0x00, 0x00, 0x8f])
+		FT817serial.flush()
+		FT817serial.reset_input_buffer()
+		FT817serial.close()
+		FT817serial = serial.Serial()
+	threadTRXLocker == False
+	
+def timeoutTRXshutdown():
+	global TRXMETER
+	print("Shutdown TRX")
+	if( TRXMETER["LastPing"]+300) < time.time():
+		print("Shutdown TRX")
+		shutdownTRX()
+		
+
+class threadtimeoutTRXshutdown(Thread):
+
+	def __init__(self):
+		Thread.__init__(self)
+
+	def run(self):
+		while True:
+			time.sleep(60)
+			timeoutTRXshutdown()
+
+
+class thSMETER(Thread):
+
+	def __init__(self):
+		Thread.__init__(self)
+
+	def run(self):
+		global FT817serial, TRXMETER
+		while True:
+			time.sleep(0.2)
+			try:		
+				while threadTRXLocker == True:
+					time.sleep(0.1)
+				threadTRXLocker == True
+				if FT817serial != "" and FT817serial.is_open == True:
+					if not TRXMETER["Status"]:
+						FT817serial.reset_output_buffer()
+						FT817serial.write([0x00, 0x00, 0x00, 0x00, 0xE7])
+						FT817serial.flush()
+						FT817serial.reset_input_buffer()
+						resp = FT817serial.read(1)
+						if(len(resp)) != 0:
+							TRXMETER["RX"] = str(resp[0] & 0x0F)
+					else:
+						FT817serial.reset_output_buffer()
+						FT817serial.write([0x00, 0x00, 0x00, 0x00, 0xbd])
+						FT817serial.flush()
+						FT817serial.reset_input_buffer()
+						resp = FT817serial.read(2)
+						if(len(resp)) != 0:
+							TRXMETER["TXpwr"] = str(int((resp[0]  & 0xF0) >> 4))
+							TRXMETER["TXalc"] = str(int(resp[0] & 0b00001111))
+							TRXMETER["TXswr"] = str(int((resp[1] & 0xF0) >> 4))
+							TRXMETER["TXmod"] = str(int(resp[1] & 0b00001111))
+				threadTRXLocker == False
+			except:
+				print("error in thSMETER")
+				pass
+
+class TRXControl(tornado.websocket.WebSocketHandler):
+
+	MODES = ["LSB", "USB", "CW", "CWR", "AM", None, "WFM", None, "FM", None, "DIG", None, "PKT"]
+	autorisedFreq=[
+		[135700,137800],
+		[472000,479000],
+		[1800000,2000000],
+		[3500000,4000000],
+		[5351500,5366500],
+		[7000000,7300000],
+		[10100000,10150000],
+		[14000000,14350000],
+		[18068000,18168000],
+		[21000000,21450000],
+		[24890000,24990000],
+		[26965000,27405000],
+		[28000000,29700000],
+		[50000000,54000000],
+		[144000000,148000000],
+		[430000000,440000000]
+		]
+	TxAutorised=False
+	
+	TRXoptions={}
+	
+	def init(self):
+		self._frequency = "999999999"
+		self._mode = ""
+		self._s_meter = ""
+		
+		self.TRXoptions["NB_On"]=[0x57,["z","z","z","z","z",1,"z","z"],"z"]#NB_On
+		self.TRXoptions["NB_Off"]=[0x57,["z","z","z","z","z",0,"z","z"],"z"]#NB_On
+		self.TRXoptions["AGC_Off"]=[0x57,[1,1,"z","z","z","z","z","z"],"z"]#AGC_Off
+		self.TRXoptions["AGC_Slow"]=[0x57,[0,1,"z","z","z","z","z","z"],"z"]#AGC_Slow
+		self.TRXoptions["AGC_Fast"]=[0x57,[1,0,"z","z","z","z","z","z"],"z"]#AGC_Fast
+		self.TRXoptions["AGC_Auto"]=[0x57,[0,0,"z","z","z","z","z","z"],"z"]#AGC_Auto
+		self.TRXoptions["TXPowerL4"]=[0x79,[0,0,"z","z","z","z","z","z"],"z"]#TXPowerL4 hight
+		self.TRXoptions["TXPowerL3"]=[0x79,[1,0,"z","z","z","z","z","z"],"z"]#TXPowerL3
+		self.TRXoptions["TXPowerL2"]=[0x79,[0,1,"z","z","z","z","z","z"],"z"]#TXPowerL2 
+		self.TRXoptions["TXPowerL1"]=[0x79,[1,1,"z","z","z","z","z","z"],"z"]#TXPowerL1 
+
+	def getTxAutorisez(self,freq):
+		self.TxAutorised=False
+		for i in range(len(self.autorisedFreq)):
+			if(freq > self.autorisedFreq[i][0] and freq < self.autorisedFreq[i][1]):
+				self.TxAutorised=True
+		print("Tx is autorisez?:"+str(self.TxAutorised))
+				
+
+	def sendPTINFOS(self):
+		global TRXMETER
+		try:
+			if not TRXMETER["Status"]:
+				if(TRXMETER["RX"] != TRXMETER["RXold"]):
+					self.write_message("RSMET:"+TRXMETER["RX"])
+					TRXMETER["RXold"] = TRXMETER["RX"]
+		except:
+			print("error TRXMETER")
+			return None
+		tornado.ioloop.IOLoop.instance().add_timeout(datetime.timedelta(seconds=0.2), self.sendPTINFOS)
+	
+	def set_mode(self,modets):
+		global FT817serial
+		try:
+			v = self.MODES.index(modets)
+		except:
+			print("error in set_mode")
+			pass
+		else:
+			FT817serial.reset_output_buffer()
+			FT817serial.write([ int(v),0x00, 0x00, 0x00, 0x07])
+			FT817serial.flush()
+
+	def get_freq_mode(self):
+		global FT817serial
+		try:
+			FT817serial.reset_output_buffer()
+			FT817serial.write([0x00, 0x00, 0x00, 0x00, 0x03])
+			FT817serial.flush()
+			FT817serial.reset_input_buffer()
+			resp = FT817serial.read(5)
+			resp_bytes = ((resp[0]), (resp[1]), (resp[2]), (resp[3]))
+			self._frequency = str("%02x%02x%02x%02x" % resp_bytes)+"0"
+			self._mode = self.MODES[(resp[4])]
+			self.getTxAutorisez(int(self._frequency))
+		except:
+			print("error in get_freq_mode")
+			time.sleep(0.5)
+			self.get_freq_mode()
+
+	def ptt_on(self):
+		global FT817serial,TRXMETER
+		if self.TxAutorised:
+			FT817serial.reset_output_buffer()
+			FT817serial.write([0x00, 0x00, 0x00, 0x00, 0x08])
+			FT817serial.flush()
+			TRXMETER["Status"]=True
+		
+	def ptt_off(self):
+		global FT817serial,TRXMETER
+		FT817serial.reset_output_buffer()
+		FT817serial.write([0x00, 0x00, 0x00, 0x00, 0x88])
+		FT817serial.flush()
+		TRXMETER["Status"]=False
+
+	def reinitserial(self):
+		global FT817serial
+		FT817serial.reset_output_buffer()
+		FT817serial.write([0x00, 0x00, 0x00, 0x00, 0x00])
+		FT817serial.flush()
+		FT817serial.reset_input_buffer()
+		FT817serial.read(1)
+		FT817serial.reset_output_buffer()
+		FT817serial.write([0x00, 0x00, 0x00, 0x00, 0x00])
+		FT817serial.flush()
+		FT817serial.reset_input_buffer()
+		FT817serial.read(1)
+		FT817serial.reset_output_buffer()
+		FT817serial.write([0x00, 0x00, 0x00, 0x00, 0x00])
+		FT817serial.flush()
+		FT817serial.reset_input_buffer()
+		FT817serial.read(1)
+
+	def read_eeprom(self,LSB,nb=2):
+		global FT817serial
+		resp=-1
+		try:
+			FT817serial.reset_output_buffer()
+			FT817serial.write([0x00, LSB, 0x00, 0x00, 0xbb])
+			FT817serial.flush()
+			FT817serial.reset_input_buffer()
+			resp = FT817serial.read(nb)
+			if(len(resp)!=nb):
+				resp=-1
+		except:
+			print("error in read_eeprom")
+			pass
+		time.sleep(0.1)
+		return resp
+		
+	def write_eeprom(self,LSB,Data_for_Address,Data_for_next_Address):
+		global FT817serial
+		if(LSB>85):
+			FT817serial.reset_output_buffer()
+			FT817serial.write([0x00, LSB, Data_for_Address, Data_for_next_Address, 0xbc])
+			FT817serial.flush()
+		
+	def set_option(self,indexdataarray):
+		dataarray = self.TRXoptions[indexdataarray]
+		epreom=self.read_eeprom(self.TRXoptions[indexdataarray][0])
+		print(epreom)
+		sendtoeprem=[epreom[0],epreom[1]]
+		for i in range(len(self.TRXoptions[indexdataarray][1])):
+			if(self.TRXoptions[indexdataarray][1][i]!="z"):
+				sendtoeprem[0]=self.set_bit(sendtoeprem[0],i,self.TRXoptions[indexdataarray][1][i])
+		self.write_eeprom(self.TRXoptions[indexdataarray][0],sendtoeprem[0],sendtoeprem[1])
+		print("befor to adress:"+str(self.TRXoptions[indexdataarray][1])+":"+str(self.tobinarray(epreom[0])))	
+		print("set to adress:"+str(self.TRXoptions[indexdataarray][1])+":"+str(self.tobinarray(sendtoeprem[0])))		
+
+	def tobinarray(self,value):
+		val = bin(value)[2:]
+		while len(val) < 8:
+			val = "0" + val
+		return val
+
+	def init_options_status(self):
+		dicterpom={}
+		for key in self.TRXoptions.keys():
+			if (self.TRXoptions[key][0] not in dicterpom.keys()):
+				rep = -1
+				while rep == -1:
+					try:
+						rep = self.read_eeprom(self.TRXoptions[key][0])[0]
+						dicterpom[self.TRXoptions[key][0]]= rep
+					except:
+						pass
+
+				
+		for key in self.TRXoptions.keys():
+			epreom = self.tobinarray(dicterpom[self.TRXoptions[key][0]])
+			good=True
+			for i in range(8):
+				if(self.TRXoptions[key][1][7-i]!="z"):
+					if(int(epreom[i]) != int(self.TRXoptions[key][1][7-i])):
+						good=False
+			if good:
+				self.write_message("ROPTI:"+key)
+		
+	def set_bit(self,v, index, x=True):
+		mask = 1 << index
+		v &= ~mask
+		if x:
+			v |= mask
+		return v
+		
+	def get_bit(self,v, index, x=True):
+		mask = 1 << index
+		v &= ~mask
+		if x:
+			v |= mask
+		return v
+		
+	def set_freq(self,freqtos):
+		global FT817serial
+		FT817serial.reset_output_buffer()
+		FT817serial.write([
+		int(freqtos[:2], 16),
+		int(freqtos[2:4], 16),
+		int(freqtos[4:6], 16),
+		int(freqtos[6:8], 16),
+		0x01])
+		FT817serial.flush()
+		FT817serial.reset_input_buffer()
+		resp = FT817serial.read(1)
+
+	def open(self):
+		global threadTRXLocker, TRXMETER
+		print('new connection on TRXControl socket')
+		TRXMETER["LastPing"]=time.time()
+		while threadTRXLocker == True:
+			time.sleep(0.1)
+		threadTRXLocker = True
+		startTRX()
+		self.reinitserial()
+		time.sleep(0.1)
+		self.init()
+		time.sleep(0.1)
+		self.get_freq_mode()
+		time.sleep(0.1)
+		self.init_options_status()
+		time.sleep(0.1)
+		self.write_message("RMODE:"+self._mode)
+		self.write_message("RFREQ:"+self._frequency)
+		self.write_message("TXALW:"+str(int(self.TxAutorised)))
+		self.sendPTINFOS()
+		threadTRXLocker = False
+
+	def on_message(self, data) :
+		global threadTRXLocker, TRXMETER
+		what = data[:5]
+		RW = data[:1]
+		dataTo = data[6:]
+		while threadTRXLocker == True:
+			time.sleep(0.1)
+		threadTRXLocker = True
+		try:
+			if(what=="PING0"):
+				self.write_message("PONG1")
+				TRXMETER["LastPing"]=time.time()
+			elif(what=="000TX"):
+				if(int(dataTo)):
+					self.ptt_on()
+				else:
+					self.ptt_off()
+			elif(RW=="S"):
+				if(what=="SFREQ"):
+					self.set_freq(dataTo)
+					time.sleep(0.1)
+					self.get_freq_mode()
+					self.write_message("RFREQ:"+self._frequency)
+					self.write_message("TXALW:"+str(int(self.TxAutorised)))
+				elif(what=="SMODE"):
+					self.set_mode(dataTo)
+					time.sleep(0.1)
+					self.get_freq_mode()
+					self.write_message("RMODE:"+self._mode)
+				elif(what=="SOPTI"):
+					self.set_option(dataTo)
+		except:
+			print("error wshCTRX on message")
+			pass
+		threadTRXLocker = False
+		
+
+	def on_close(self):
+		print('connection closed for TRXControl socket')
+		
+##########################
+
+############ Main ##############
+class MainHandler(tornado.web.RequestHandler):
+	def get(self):
+		self.application.settings.get("compiled_template_cache", False)
+		self.set_header('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0')
+		self.render("www/index.html")
+		
+		
+if __name__ == "__main__":		
+
+	threadFFT = loadFFTdata()
+	threadFFT.start()
+	
+	threadSMETER = thSMETER()
+	threadSMETER.start()
+	
+	threadsurveilTRX = threadtimeoutTRXshutdown()
+	threadsurveilTRX.start()
+	
+	app = tornado.web.Application([
+	(r'/wsTRXC', TRXControl),
+	(r'/wsTX', TXDecoderWS),
+	(r'/audio', AudioHandler),
+	(r'/FFT', FFTHandler),
+	(r'/', MainHandler),
+	(r'/(.*)', tornado.web.StaticFileHandler, { 'path' : './www' })
+	],debug=True)
+
+	http_server = tornado.httpserver.HTTPServer(app, ssl_options={
+	"certfile": os.path.join("/opt/remote817/selfsign.crt"),
+	"keyfile": os.path.join("/opt/remote817/selfsign.key"),
+	})
+	http_server.listen(8888)
+	print('http server started')
+	tornado.ioloop.IOLoop.instance().start()
+	p.terminate()
+##########################

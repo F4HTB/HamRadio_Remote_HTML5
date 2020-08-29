@@ -1,0 +1,174 @@
+<html>
+	<head>
+		<meta charset="UTF-8">
+		<link rel="stylesheet" type="text/css" href="style.css">
+		<script src="Cookies.js"></script>
+		<script src="controls.js"></script>
+	</head>
+	<body onload="checkCookie()">
+	
+		<a href="#fermer" id="ombre-body"></a>
+		<div id="pop-upspinner"> 
+                <img alt="" src="img/spinner.gif"> 
+				<p  id="socketsate"><center>Wait For connection....</center></p>
+        </div>
+		
+
+		<div id="div-princ">
+		
+			<img onclick="powertogle();" id="button_power" src="img/poweroff.png">
+			<span onmousedown="if(poweron && txallow){button_pressed();toggleRecord(true);toggleaudioRX();sendctrlTX(true);}" onmouseup="button_unpressed();if(poweron && txallow){toggleRecord();toggleaudioRX();sendctrlTX(false);}" class="button_unpressed" id="record">TX</span>
+			<form id="record_opus">
+				<input type="checkbox" id="encode" alt="Encode TX with opus codec">Encode TX</input><br>
+			</form>
+			
+			<form id="personalfrequency">
+			  <select id="selectpersonalfrequency">
+			  </select>
+			  <label onclick="recall_freqfromcokkies();">recall</label>
+			  <label onclick="delete_freqfromcokkies();">&nbsp;delete</label>
+			  <label onclick="save_freqtocokkies();">&nbsp;save</label>
+			</form>
+			
+			
+			<form id="volume_control">
+				<p>RX volume:</p>
+				<input oninput="audioRX.volume=(this.value/100);" onchange="audioRX.volume=(this.value/100);" value="50" step="5" type="range" id="C_af" name="volume" min="0" max="100">
+			</form>
+			
+			
+			<div id="Txmeters">
+				<div id="Txinstant">
+					<div class="label">TX volume:</div>
+					<meter high="0.25" max="1" value="0"></meter>
+					<div class="value"></div>
+				</div>
+			</div>
+			
+			
+			<div id="div-mode_menu">
+				<ul>
+				  <li onclick="togle_li();sendTRXmode();" class="button_mode button_pressed" lichecked="">USB</li>
+				  <li onclick="togle_li();sendTRXmode();" class="button_mode button_unpressed">LSB</li>
+				  <li onclick="togle_li();sendTRXmode();" class="button_mode button_unpressed">CW</li>
+				  <li onclick="togle_li();sendTRXmode();" class="button_mode button_unpressed">AM</li>
+				  <li onclick="togle_li();sendTRXmode();" class="button_mode button_unpressed">FM</li>
+				</ul>
+			</div>
+			
+			<div id="div-TxPOwer">
+				<ul>
+				  <li onclick="togle_li();sendTXpower();" class="button_mode button_pressed" lichecked="" v=1>0.5w</li>
+				  <li onclick="togle_li();sendTXpower();" class="button_mode button_unpressed" v=2>1w</li>
+				  <li onclick="togle_li();sendTXpower();" class="button_mode button_unpressed" v=3>2.5w</li>
+				  <li onclick="togle_li();sendTXpower();" class="button_mode button_unpressed" v=4>5w</li>
+				</ul>
+			</div>
+			
+			<div id="div-AGCset">
+				<ul>
+				  <li onclick="togle_li();sendAGC();" class="button_mode button_pressed" lichecked="" v="Auto">AGC auto</li>
+				  <li onclick="togle_li();sendAGC();" class="button_mode button_unpressed" v="Slow">AGC slow</li>
+				  <li onclick="togle_li();sendAGC();" class="button_mode button_unpressed" v="Fast">AGC fast</li>
+				  <li onclick="togle_li();sendAGC();" class="button_mode button_unpressed" v="Off">AGC off</li>
+				</ul>
+			</div>
+			
+			<div id="div-NBset">
+				<ul>
+				  <li onclick="togle_li();sendNB();" class="button_mode button_pressed" lichecked="" v="Off">NB Off</li>
+				  <li onclick="togle_li();sendNB();" class="button_mode button_unpressed" v="On">NB On</li>
+				</ul>
+			</div>
+			
+			<div id="div-freq">
+				<ul id="freq_but">
+				  <li onmousedown="button_pressed();rotatefreq();" onmouseup="button_unpressed();" class="button_unpressed" digit="cmhz" v=100000000>▲</li>
+				  <li onmousedown="button_pressed();rotatefreq();" onmouseup="button_unpressed();" class="button_unpressed" digit="dmhz" v=10000000>▲</li>
+				  <li onmousedown="button_pressed();rotatefreq();" onmouseup="button_unpressed();" class="button_unpressed" digit="umhz" v=1000000>▲</li>
+				  <li onmousedown="button_pressed();rotatefreq();" onmouseup="button_unpressed();"> </li>
+				  <li onmousedown="button_pressed();rotatefreq();" onmouseup="button_unpressed();" class="button_unpressed" digit="ckhz" v=100000>▲</li>
+				  <li onmousedown="button_pressed();rotatefreq();" onmouseup="button_unpressed();" class="button_unpressed" digit="dkhz" v=10000>▲</li>
+				  <li onmousedown="button_pressed();rotatefreq();" onmouseup="button_unpressed();" class="button_unpressed" digit="ukhz" v=1000>▲</li>
+				  <li onmousedown="button_pressed();rotatefreq();" onmouseup="button_unpressed();"> </li>
+				  <li onmousedown="button_pressed();rotatefreq();" onmouseup="button_unpressed();" class="button_unpressed" digit="chz" v=100>▲</li>
+				  <li onmousedown="button_pressed();rotatefreq();" onmouseup="button_unpressed();" class="button_unpressed" digit="dhz" v=10>▲</li>
+				  <li onmousedown="button_pressed();rotatefreq();" onmouseup="button_unpressed();" class="button_unpressed" digit="uhz" v=1>▲</li>
+				</ul>
+				<ul id="freq_disp">
+				  <li class="freq_digit" id="cmhz">0</li>
+				  <li class="freq_digit" id="dmhz">0</li>
+				  <li class="freq_digit" id="umhz">0</li>
+				  <li class="freq_digit">.</li>
+				  <li class="freq_digit" id="ckhz">0</li>
+				  <li class="freq_digit" id="dkhz">0</li>
+				  <li class="freq_digit" id="ukhz">0</li>
+				  <li class="freq_digit">.</li>
+				  <li class="freq_digit" id="chz">0</li>
+				  <li class="freq_digit" id="dhz">0</li>
+				  <li class="freq_digit" id="uhz">0</li>
+				</ul>
+				<ul id="freq_but">
+				  <li onmousedown="button_pressed();rotatefreq();" onmouseup="button_unpressed();" class="button_unpressed" digit="cmhz" v=-100000000>▼</li>
+				  <li onmousedown="button_pressed();rotatefreq();" onmouseup="button_unpressed();" class="button_unpressed" digit="dmhz" v=-10000000>▼</li>
+				  <li onmousedown="button_pressed();rotatefreq();" onmouseup="button_unpressed();" class="button_unpressed" digit="umhz" v=-1000000>▼</li>
+				  <li onmousedown="button_pressed();rotatefreq();" onmouseup="button_unpressed();"> </li>
+				  <li onmousedown="button_pressed();rotatefreq();" onmouseup="button_unpressed();" class="button_unpressed" digit="ckhz" v=-100000>▼</li>
+				  <li onmousedown="button_pressed();rotatefreq();" onmouseup="button_unpressed();" class="button_unpressed" digit="dkhz" v=-10000>▼</li>
+				  <li onmousedown="button_pressed();rotatefreq();" onmouseup="button_unpressed();" class="button_unpressed" digit="ukhz" v=-1000>▼</li>
+				  <li onmousedown="button_pressed();rotatefreq();" onmouseup="button_unpressed();" > </li>
+				  <li onmousedown="button_pressed();rotatefreq();" onmouseup="button_unpressed();" class="button_unpressed" digit="chz" v=-100>▼</li>
+				  <li onmousedown="button_pressed();rotatefreq();" onmouseup="button_unpressed();" class="button_unpressed" digit="dhz" v=-10>▼</li>
+				  <li onmousedown="button_pressed();rotatefreq();" onmouseup="button_unpressed();" class="button_unpressed" digit="uhz" v=-1>▼</li>
+				</ul>
+			</div>
+
+			<canvas id="cansp" width=2048 height=256 ></canvas>
+			<canvas id="canwf" width=2048 height=256 ></canvas>	
+			
+			<canvas id="canRXsmeter" width=250 height=50 ></canvas>
+			<div id="div-smeterdigitRX">S9+40dB</div>
+			
+			<canvas id="canTXsmeter" width=250 height=40 ></canvas>
+			<div id="div-smeterdigitTX"><p id="TXPWR">PWR:000w</p><p id="TXSWR">SWR:000~</p><p id="TXALC">ALC:000%</p><p id="TXMOD">MOD:000%</p></div>
+			
+			 <canvas class="visualizer" id="canBFSPC" width="640" height="100"></canvas>
+			 <canvas class="visualizer" id="canBFFFT" width="640" height="100"></canvas>
+			
+			<div id="div-bandshortcut">
+				<ul>
+				  <li onmousedown="button_pressed();scfreq();" onmouseup="button_unpressed();" class="button_mode button_unpressed" frq="000135700">2200m</li>
+				  <li onmousedown="button_pressed();scfreq();" onmouseup="button_unpressed();" class="button_mode button_unpressed" frq="000472000">630m</li>
+				  <li onmousedown="button_pressed();scfreq();" onmouseup="button_unpressed();" class="button_mode button_unpressed" frq="001800000">160m</li>
+				  <li onmousedown="button_pressed();scfreq();" onmouseup="button_unpressed();" class="button_mode button_unpressed" frq="003500000">80m</li>
+				  <li onmousedown="button_pressed();scfreq();" onmouseup="button_unpressed();" class="button_mode button_unpressed" frq="005351500">60m</li>
+				  <li onmousedown="button_pressed();scfreq();" onmouseup="button_unpressed();" class="button_mode button_unpressed" frq="007000000">40m</li>
+				  <li onmousedown="button_pressed();scfreq();" onmouseup="button_unpressed();" class="button_mode button_unpressed" frq="010100000">30m</li>
+				  <li onmousedown="button_pressed();scfreq();" onmouseup="button_unpressed();" class="button_mode button_unpressed" frq="014000000">20m</li>
+				  <li onmousedown="button_pressed();scfreq();" onmouseup="button_unpressed();" class="button_mode button_unpressed" frq="018068000">17m</li>
+				  <li onmousedown="button_pressed();scfreq();" onmouseup="button_unpressed();" class="button_mode button_unpressed" frq="021000000">15m</li>
+				  <li onmousedown="button_pressed();scfreq();" onmouseup="button_unpressed();" class="button_mode button_unpressed" frq="024890000">12m</li>
+				  <li onmousedown="button_pressed();scfreq();" onmouseup="button_unpressed();" class="button_mode button_unpressed" frq="028000000">10m</li>
+				  <li onmousedown="button_pressed();scfreq();" onmouseup="button_unpressed();" class="button_mode button_unpressed" frq="050000000">6m</li>
+				  <li onmousedown="button_pressed();scfreq();" onmouseup="button_unpressed();" class="button_mode button_unpressed" frq="144000000">2m</li>
+				  <li onmousedown="button_pressed();scfreq();" onmouseup="button_unpressed();" class="button_mode button_unpressed" frq="430000000">70cm</li>
+				</ul>
+			</div>
+
+			<div id="div-scoketscontrols">
+				<p id="indcwsTX"><img src="img/critsred.png">wsTX</p>
+				<p id="indcwsRX"><img src="img/critsred.png">wsRX</p>
+				<p id="indcwsCtrl"><img src="img/critsred.png">wsCtrl</p>
+				<p id="indcwsFFT"><img src="img/critsred.png">wsFFT</p>
+			</div>
+			<div id="div-latencymeter">latency:∞</div>
+		</div>
+		
+	</body>
+	
+	<script src="TXhandler.js"></script>
+	<script src="FFThandler.js"></script>
+	<script src="RXhandler.js"></script>
+	<script>
+	
+</html>
