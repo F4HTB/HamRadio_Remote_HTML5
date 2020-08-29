@@ -12,6 +12,8 @@ Diagram for rtl:
 
 ![alt text](https://github.com/F4HTB/HamRadio_Remote_HTML5/blob/master/rtlsdr_diagram.png?raw=true)
 
+see at https://f6cxo.pagesperso-orange.fr/cariboost_files/FT817_20PANADAPTER.pdf or use without.
+
 sudo apt-get install python3-pyaudio  python3-serial python3-tornado python3-matplotlib rtl-sdr python3-numpy python3
 
 git clone https://github.com/F4HTB/HamRadio_Remote_HTML5.git
