@@ -32,12 +32,17 @@ import serial
 
 
 ########### Generate and send FFT from RTLSDR ###############
-sdr = RtlSdr()
-# configure device
-sdr.sample_rate = 250000  # Hz
-sdr.center_freq = 68330000  # Hz
-sdr.freq_correction = 1   # PPM
-sdr.gain = 100 #'auto'
+isfft = True
+
+try:
+	sdr = RtlSdr()
+	# configure device
+	sdr.sample_rate = 250000  # Hz
+	sdr.center_freq = 68330000  # Hz
+	sdr.freq_correction = 1   # PPM
+	sdr.gain = 100 #'auto'
+except:
+	isfft = False
 
 FFTSIZE=2048
 nbBuffer=24
@@ -158,8 +163,10 @@ class FFTHandler(tornado.websocket.WebSocketHandler):
 		tornado.ioloop.IOLoop.instance().add_timeout(datetime.timedelta(seconds=0.2), self.sendFFT)
 
 	def open(self):
-		print('new connection on FFT socket')
-		self.sendFFT()
+		global isfft
+		print('new connection on FFT socket, isfft = '+str(isfft))
+		if isfft:
+			self.sendFFT()
 
 	def on_close(self):
 		print('connection closed for FFT socket')
@@ -721,10 +728,11 @@ class MainHandler(tornado.web.RequestHandler):
 		self.render("www/index.html")
 		
 		
-if __name__ == "__main__":		
-
-	threadFFT = loadFFTdata()
-	threadFFT.start()
+if __name__ == "__main__":	
+	
+	if isfft:
+		threadFFT = loadFFTdata()
+		threadFFT.start()
 	
 	threadSMETER = thSMETER()
 	threadSMETER.start()
